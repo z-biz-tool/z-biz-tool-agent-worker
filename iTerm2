@@ -1,0 +1,15 @@
+
+> z-cc-worker@1.0.0 electron:dev
+> concurrently "vite" "electron ." 3.6.964
+
+[2] /bin/sh: 3.6.964: command not found
+[2] 3.6.964 exited with code 127
+[0] 
+[0]   VITE v4.5.14  ready in 133 ms
+[0] 
+[0]   ➜  Local:   http://localhost:5173/
+[0]   ➜  Network: use --host to expose
+[1] [Server] Running on http://localhost:3001
+[0] vite exited with code SIGKILL
+[1] /Users/zifang/workplace/idea_workplace/z-cc-worker/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron exited with signal SIGKILL
+[1] electron . exited with code 1

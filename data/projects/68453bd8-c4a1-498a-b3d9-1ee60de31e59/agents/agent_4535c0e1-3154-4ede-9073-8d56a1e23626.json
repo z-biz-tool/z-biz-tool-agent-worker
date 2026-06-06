@@ -1,0 +1,18 @@
+{
+  "id": "4535c0e1-3154-4ede-9073-8d56a1e23626",
+  "projectId": "68453bd8-c4a1-498a-b3d9-1ee60de31e59",
+  "name": "开发",
+  "identity": {
+    "role": "开发",
+    "systemPrompt": "你是一个有用的AI助手。"
+  },
+  "model": {
+    "provider": "hermes-local",
+    "modelName": "default",
+    "temperature": 0.7
+  },
+  "status": "idle",
+  "currentTaskId": null,
+  "createdAt": "2026-05-19T05:02:03.884Z",
+  "lastUsedAt": "2026-05-19T05:50:47.693Z"
+}
