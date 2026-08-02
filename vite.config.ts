@@ -1,15 +1,23 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-import { resolve } from 'path';
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
-  base: './',
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
+  clearScreen: false,
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
   },
   server: {
-    port: 5180,
+    port: 5173,
+    strictPort: true,
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
   },
 });
