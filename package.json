@@ -9,18 +9,21 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write \"src/**/*.{ts,tsx,css}\""
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
+    "agent-proxy:build": "cd agent-proxy && ../node_modules/.bin/tsc -p tsconfig.json",
+    "agent-proxy:start": "node agent-proxy/dist/index.js"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.0.0",
+    "@tauri-apps/api": "^2.0.0",
+    "antd": "^6.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "antd": "^6.0.0",
-    "@ant-design/icons": "^6.0.0",
-    "zustand": "^5.0.0",
-    "@tauri-apps/api": "^2.0.0"
+    "zustand": "^5.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^18.19.130",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

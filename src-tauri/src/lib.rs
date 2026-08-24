@@ -1,14 +1,20 @@
+mod agent_proxy;
 mod commands;
 mod models;
 mod storage;
 
+use std::sync::Mutex;
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        // Owned by the app so the event loop can find it on shutdown.
+        .manage(agent_proxy::AgentProxyHandle(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::create_project,
@@ -29,7 +35,40 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
         ])
-        .setup(|_app| Ok(()))
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .setup(|app| {
+            match agent_proxy::spawn() {
+                Ok(child) => {
+                    let state = app.state::<agent_proxy::AgentProxyHandle>();
+                    *state.0.lock().expect("agent-proxy mutex poisoned") = Some(child);
+                }
+                Err(e) => {
+                    // Don't block app startup — the rest of the UI works fine
+                    // without the proxy. The user can see the error in stderr.
+                    eprintln!("[agent-proxy] failed to start: {}", e);
+                }
+            }
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // Detach the Child from the State before calling kill — the
+            // MutexGuard borrows from `state` which itself borrows from
+            // `app_handle`, so we must release the lock while the borrow
+            // chain is still in scope.
+            let child_opt = {
+                let state = app_handle.state::<agent_proxy::AgentProxyHandle>();
+                let mut guard = state.0.lock().expect("agent-proxy mutex poisoned");
+                let taken = guard.take();
+                drop(guard);
+                taken
+            };
+            if let Some(mut child) = child_opt {
+                eprintln!("[agent-proxy] shutting down child process");
+                agent_proxy::kill(&mut child);
+            }
+        }
+    });
 }

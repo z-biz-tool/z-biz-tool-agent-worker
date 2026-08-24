@@ -1,0 +1,21 @@
+{
+  "name": "agent-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local OpenAI-compatible proxy that bridges to Hermes / OpenCode / Claude Code. Node.js rewrite of future-team-agent-proxy.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.130",
+    "typescript": "^5.6.0"
+  }
+}
