@@ -41,10 +41,20 @@ export interface Task {
   description: string;
   status: "todo" | "doing" | "waiting" | "review" | "done";
   assigned_agent_id: string | null;
+  assigned_agent_name?: string | null;
   parent_id: string | null;
   children: string[];
+  /** agent 执行后的最终输出,Markdown / 纯文本 / JSON 都可能 */
+  output: string | null;
+  /** 同 output,保留字段名以兼容后端 model */
+  agent_output?: string | null;
+  /** 等待用户输入标记 */
+  waiting_for_input?: boolean | null;
+  /** Agent 附件 receipts */
+  receipts?: unknown;
   created_at: string;
   updated_at: string;
+  completed_at?: string | null;
 }
 
 export interface TaskMessage {

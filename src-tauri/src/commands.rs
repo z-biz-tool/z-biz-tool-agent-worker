@@ -1,3 +1,4 @@
+use crate::agent_runner;
 use crate::models::*;
 use crate::storage;
 use chrono::Utc;
@@ -276,7 +277,89 @@ pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
     storage::save_agent(&agent);
 
     storage::save_task(&task);
+
+    // 后台触发 agent-proxy 真实执行。task 已经持久化为 doing,
+    // 即使后台失败,任务也不会卡死:失败时改 waiting + 写错误到 output。
+    let task_id_bg = task.id.clone();
+    let agent_id_bg = agent.id.clone();
+    let cli_type_bg = agent.cli_type.clone();
+    let prompt_bg = format!(
+        "任务标题: {}\n任务描述: {}\n\n请直接给出结果,不要解释你的工具调用过程。",
+        task.title, task.description
+    );
+    std::thread::spawn(move || {
+        run_task_background(&task_id_bg, &agent_id_bg, cli_type_bg.as_deref(), &prompt_bg);
+    });
+
     Ok(task)
+}
+
+/// 重试卡在 doing 的任务(网络抖 / agent-proxy 重启后状态丢失 / LLM 超时等场景)。
+/// 把 task 改回 doing 后再后台跑一次。
+#[tauri::command]
+pub fn retry_task(task_id: String) -> Result<Task, String> {
+    let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
+    let agent_id = task
+        .assigned_agent_id
+        .clone()
+        .ok_or("任务没有分配 Agent,无法重试")?;
+    let agent = storage::find_agent(&agent_id).ok_or("Agent不存在")?;
+
+    task.status = "doing".to_string();
+    task.updated_at = Utc::now().to_rfc3339();
+    storage::save_task(&task);
+
+    let task_id_bg = task.id.clone();
+    let agent_id_bg = agent.id.clone();
+    let cli_type_bg = agent.cli_type.clone();
+    let prompt_bg = format!(
+        "任务标题: {}\n任务描述: {}\n\n请直接给出结果,不要解释你的工具调用过程。",
+        task.title, task.description
+    );
+    std::thread::spawn(move || {
+        run_task_background(&task_id_bg, &agent_id_bg, cli_type_bg.as_deref(), &prompt_bg);
+    });
+    Ok(task)
+}
+
+/// 后台执行核心:调本地 agent-proxy,成功 → review + output,失败 → waiting + 错误信息。
+/// cli_type 为 None(手填 agent)时不调 LLM,直接停在 doing 等用户手动操作。
+fn run_task_background(task_id: &str, agent_id: &str, cli_type: Option<&str>, prompt: &str) {
+    let Some(cli_type) = cli_type else {
+        eprintln!("[run_task_background] agent {} 非本地 CLI,跳过执行", agent_id);
+        return;
+    };
+    match agent_runner::run_agent(cli_type, prompt) {
+        Ok(output) => {
+            if let Some(mut t) = storage::find_task(task_id) {
+                t.output = Some(output.clone());
+                t.agent_output = Some(output);
+                t.status = "review".to_string();
+                t.updated_at = Utc::now().to_rfc3339();
+                storage::save_task(&t);
+            }
+            // 释放 Agent
+            if let Some(mut a) = storage::find_agent(agent_id) {
+                a.status = "idle".to_string();
+                a.current_task_id = None;
+                storage::save_agent(&a);
+            }
+        }
+        Err(e) => {
+            eprintln!("[run_task_background] task {} agent-proxy 执行失败: {}", task_id, e);
+            if let Some(mut t) = storage::find_task(task_id) {
+                t.status = "waiting".to_string();
+                t.output = Some(format!("[执行失败,点「重试」再来一次]\n\n{}", e));
+                t.updated_at = Utc::now().to_rfc3339();
+                storage::save_task(&t);
+            }
+            if let Some(mut a) = storage::find_agent(agent_id) {
+                a.status = "idle".to_string();
+                a.current_task_id = None;
+                storage::save_agent(&a);
+            }
+        }
+    }
 }
 
 /// 任意状态流转。合法的状态: todo | doing | waiting | review | done

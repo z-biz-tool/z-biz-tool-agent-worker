@@ -24,6 +24,7 @@ interface WorkerState {
   createTask: (projectId: string, title: string, desc: string, parentId?: string) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
   assignTask: (taskId: string, agentId: string) => Promise<void>;
+  retryTask: (taskId: string) => Promise<void>;
   reviewTask: (taskId: string, approved: boolean) => Promise<void>;
   updateTaskStatus: (taskId: string, status: string) => Promise<void>;
 
@@ -112,6 +113,12 @@ export const useWorkerStore = create<WorkerState>((set, get) => ({
 
   assignTask: async (taskId, agentId) => {
     await invoke("assign_task", { taskId, agentId });
+    const pid = get().currentProjectId;
+    if (pid) await get().selectProject(pid);
+  },
+
+  retryTask: async (taskId) => {
+    await invoke("retry_task", { taskId });
     const pid = get().currentProjectId;
     if (pid) await get().selectProject(pid);
   },

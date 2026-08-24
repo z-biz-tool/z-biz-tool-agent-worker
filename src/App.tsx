@@ -9,6 +9,7 @@ import {
   ProjectOutlined, TeamOutlined, CheckCircleOutlined, ClockCircleOutlined,
   ExclamationCircleOutlined, PlayCircleOutlined, PauseCircleOutlined,
   EyeOutlined, SettingOutlined, ApiOutlined, ReloadOutlined, ThunderboltOutlined,
+  FileTextOutlined, SyncOutlined,
 } from "@ant-design/icons";
 import { useWorkerStore } from "./stores/workerStore";
 import type { Agent, Task, LocalAgentInfo } from "./types";
@@ -42,12 +43,26 @@ export default function App() {
   const [taskForm, setTaskForm] = useState({ title: "", desc: "" });
   // 高级模式:手填 Agent
   const [manualAgentForm, setManualAgentForm] = useState({ name: "", prompt: "", model: "" });
+  // 查看输出弹窗
+  const [outputModal, setOutputModal] = useState<{ title: string; content: string } | null>(null);
 
   useEffect(() => { store.loadProjects(); }, []);
 
   const currentProject = store.projects.find(p => p.id === store.currentProjectId);
   const agents = store.agents;
   const tasks = store.tasks;
+
+  // 轮询:当当前项目里有 doing/waiting 状态的任务时,每 3s 拉一次最新状态。
+  // agent 后台执行结束后会把 task 改成 review,UI 刷新后看到。
+  useEffect(() => {
+    if (!currentProject) return;
+    const hasInFlight = tasks.some(t => t.status === "doing" || t.status === "waiting");
+    if (!hasInFlight) return;
+    const timer = setInterval(() => {
+      store.selectProject(currentProject.id);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [currentProject, tasks]);
 
   // ─────────── 侧栏 ───────────
   const sider = (
@@ -274,6 +289,8 @@ export default function App() {
   const renderTaskRow = (task: Task) => {
     const agent = task.assigned_agent_id ? agents.find(a => a.id === task.assigned_agent_id) : null;
     const cfg = STATUS_CONFIG[task.status];
+    const hasOutput = !!(task.output || task.agent_output);
+    const outputContent = task.output || task.agent_output || "";
     return (
       <Card key={task.id} size="small" style={{ marginBottom: 8 }} hoverable>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -281,7 +298,25 @@ export default function App() {
             {cfg.label}
           </Tag>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <Text strong style={{ fontSize: 14 }}>{task.title}</Text>
+            <Space size={6}>
+              <Text strong style={{ fontSize: 14 }}>{task.title}</Text>
+              {hasOutput && (
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<FileTextOutlined />}
+                  style={{ padding: 0, height: "auto", fontSize: 12 }}
+                  onClick={() => setOutputModal({ title: task.title, content: outputContent })}
+                >
+                  查看输出
+                </Button>
+              )}
+              {task.status === "doing" && (
+                <Tag icon={<SyncOutlined spin />} color="processing" style={{ margin: 0, fontSize: 11 }}>
+                  执行中
+                </Tag>
+              )}
+            </Space>
             {task.description && (
               <Paragraph type="secondary" ellipsis={{ rows: 1 }} style={{ fontSize: 12, margin: "2px 0 0" }}>
                 {task.description}
@@ -301,6 +336,19 @@ export default function App() {
             )}
           </div>
           <Space size={4}>
+            {/* 重试(doing / waiting 状态) */}
+            {(task.status === "doing" || task.status === "waiting") && task.assigned_agent_id && (
+              <Button
+                size="small"
+                icon={<SyncOutlined />}
+                onClick={() => {
+                  message.info("已重新触发执行");
+                  store.retryTask(task.id);
+                }}
+              >
+                重试
+              </Button>
+            )}
             {/* 改状态 */}
             <Dropdown
               menu={{
@@ -516,6 +564,27 @@ export default function App() {
           value={taskForm.desc}
           onChange={e => setTaskForm({ ...taskForm, desc: e.target.value })}
         />
+      </Modal>
+
+      {/* 查看任务输出弹窗 */}
+      <Modal
+        title={outputModal?.title || "任务输出"}
+        open={!!outputModal}
+        onCancel={() => setOutputModal(null)}
+        footer={<Button onClick={() => setOutputModal(null)}>关闭</Button>}
+        width={720}
+      >
+        <pre style={{
+          background: "#fafafa",
+          padding: 12,
+          borderRadius: 6,
+          maxHeight: 480,
+          overflow: "auto",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          fontSize: 13,
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        }}>{outputModal?.content}</pre>
       </Modal>
     </Layout>
   );

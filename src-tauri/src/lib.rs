@@ -1,4 +1,5 @@
 mod agent_proxy;
+mod agent_runner;
 mod commands;
 mod models;
 mod storage;
@@ -30,6 +31,7 @@ pub fn run() {
             commands::create_task,
             commands::delete_task,
             commands::assign_task,
+            commands::retry_task,
             commands::review_task,
             commands::update_task_status,
             commands::get_agent_status,
