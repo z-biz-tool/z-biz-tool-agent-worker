@@ -106,10 +106,23 @@ fn resolve_node() -> Option<PathBuf> {
 }
 
 fn resolve_entry() -> Option<PathBuf> {
-    // 1. Production: alongside the executable (Tauri bundles the dist/ folder
-    //    next to the app binary in the macOS .app, on Windows next to .exe).
+    // 1. Production: alongside the executable. On macOS .app bundles the
+    //    Tauri `resources` map lands under Contents/Resources/, while on
+    //    Windows / Linux the bundle is laid out next to the .exe / binary.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // 1a. macOS .app: <Contents>/Resources/agent-proxy/dist/index.js
+            if let Some(contents_dir) = dir.parent() {
+                let p = contents_dir
+                    .join("Resources")
+                    .join("agent-proxy")
+                    .join("dist")
+                    .join("index.js");
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+            // 1b. Windows / Linux: alongside the binary
             let p = dir.join("agent-proxy").join("dist").join("index.js");
             if p.exists() {
                 return Some(p);

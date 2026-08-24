@@ -64,10 +64,6 @@ pub fn write_projects(projects: &[Project]) {
     fs::write(projects_file(), content).expect("写入项目文件失败");
 }
 
-pub fn find_project(id: &str) -> Option<Project> {
-    read_projects().into_iter().find(|p| p.id == id)
-}
-
 pub fn save_project(project: &Project) {
     let mut projects = read_projects();
     if let Some(idx) = projects.iter().position(|p| p.id == project.id) {
