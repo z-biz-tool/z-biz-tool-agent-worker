@@ -2,6 +2,8 @@ use crate::models::*;
 use crate::storage;
 use chrono::Utc;
 
+const AGENT_PROXY_URL: &str = "http://127.0.0.1:9099";
+
 // ===== 项目命令 =====
 
 #[tauri::command]
@@ -63,6 +65,41 @@ pub fn list_agents(project_id: String) -> Vec<Agent> {
     storage::read_agents_by_project(&project_id)
 }
 
+/// 探测本机可用的 CLI agent(claude-code / hermes / opencode)。
+/// 转发到本地 agent-proxy 的 GET /v1/cli-agents,带 1.5s 超时。
+/// agent-proxy 没起时不报错,返回空列表。
+#[tauri::command]
+pub fn discover_local_agents() -> Vec<LocalAgentInfo> {
+    let url = format!("{}/v1/cli-agents", AGENT_PROXY_URL);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_millis(1500))
+        .timeout_connect(std::time::Duration::from_millis(500))
+        .build();
+    match agent.get(&url).call() {
+        Ok(resp) => {
+            let reader = resp.into_reader();
+            match serde_json::from_reader::<_, serde_json::Value>(reader) {
+                Ok(v) => {
+                    let arr = v.get("cli_agents").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    arr.into_iter()
+                        .filter_map(|item| serde_json::from_value::<LocalAgentInfo>(item).ok())
+                        .collect()
+                }
+                Err(e) => {
+                    eprintln!("[discover_local_agents] parse error: {}", e);
+                    Vec::new()
+                }
+            }
+        }
+        Err(e) => {
+            // agent-proxy 未启动 / 网络不通 — 不阻塞 UI
+            eprintln!("[discover_local_agents] proxy unreachable: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// 高级模式:手填 Agent(不走本地 CLI)。
 #[tauri::command]
 pub fn create_agent(project_id: String, name: String, prompt: String, model: String) -> Agent {
     let now = Utc::now().to_rfc3339();
@@ -74,11 +111,64 @@ pub fn create_agent(project_id: String, name: String, prompt: String, model: Str
         model: if model.is_empty() { "default".to_string() } else { model },
         status: "idle".to_string(),
         current_task_id: None,
+        source: "manual".to_string(),
+        cli_type: None,
+        local_agent_id: None,
+        cli_version: None,
+        cli_path: None,
         created_at: now.clone(),
         last_used_at: now,
     };
     storage::save_agent(&agent);
     agent
+}
+
+/// 主入口:从本地 CLI 引入 Agent 到项目。
+/// 同一个项目下,同一个 cli_type 只允许挂一个(避免重复占位)。
+/// 已存在则返回 Err,不静默覆盖。
+#[tauri::command]
+pub fn import_local_agent(
+    project_id: String,
+    cli_type: String,
+    command: String,
+    cli_path: Option<String>,
+    cli_version: Option<String>,
+    local_agent_id: Option<String>,
+) -> Result<Agent, String> {
+    // 查重:同 project + 同 cli_type 已存在则拒绝
+    let existing: Vec<Agent> = storage::read_agents_by_project(&project_id)
+        .into_iter()
+        .filter(|a| a.cli_type.as_deref() == Some(&cli_type))
+        .collect();
+    if !existing.is_empty() {
+        return Err(format!("本项目已挂载 {} 类型的 Agent", cli_type));
+    }
+
+    let display_name = match cli_type.as_str() {
+        "claude-code" => "Claude Code",
+        "hermes" => "Hermes",
+        "opencode" => "OpenCode",
+        other => other,
+    };
+    let now = Utc::now().to_rfc3339();
+    let agent = Agent {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id,
+        name: display_name.to_string(),
+        system_prompt: format!("通过本地 {} CLI 引入的 Agent。", display_name),
+        model: "default".to_string(),
+        status: "idle".to_string(),
+        current_task_id: None,
+        source: "local".to_string(),
+        cli_type: Some(cli_type),
+        local_agent_id,
+        cli_version,
+        cli_path: cli_path.or(Some(command)),
+        created_at: now.clone(),
+        last_used_at: now,
+    };
+    storage::save_agent(&agent);
+    Ok(agent)
 }
 
 #[tauri::command]
@@ -99,6 +189,11 @@ pub fn clone_agent(project_id: String, source_id: String, name: String) -> Resul
         model: source.model,
         status: "idle".to_string(),
         current_task_id: None,
+        source: source.source.clone(),
+        cli_type: source.cli_type.clone(),
+        local_agent_id: source.local_agent_id.clone(),
+        cli_version: source.cli_version.clone(),
+        cli_path: source.cli_path.clone(),
         created_at: now.clone(),
         last_used_at: now,
     };
@@ -180,6 +275,33 @@ pub fn assign_task(task_id: String, agent_id: String) -> Result<Task, String> {
     agent.last_used_at = Utc::now().to_rfc3339();
     storage::save_agent(&agent);
 
+    storage::save_task(&task);
+    Ok(task)
+}
+
+/// 任意状态流转。合法的状态: todo | doing | waiting | review | done
+/// 切到 done 时同时设置 completed_at;doing 时如果原来有 assigned_agent,会保留分配。
+#[tauri::command]
+pub fn update_task_status(task_id: String, status: String) -> Result<Task, String> {
+    let valid = ["todo", "doing", "waiting", "review", "done"];
+    if !valid.contains(&status.as_str()) {
+        return Err(format!("非法状态: {}", status));
+    }
+    let mut task = storage::find_task(&task_id).ok_or("任务不存在")?;
+    let now = Utc::now().to_rfc3339();
+    task.status = status.clone();
+    task.updated_at = now.clone();
+    if status == "done" {
+        task.completed_at = Some(now);
+        // 释放 Agent
+        if let Some(agent_id) = &task.assigned_agent_id {
+            if let Some(mut agent) = storage::find_agent(agent_id) {
+                agent.status = "idle".to_string();
+                agent.current_task_id = None;
+                storage::save_agent(&agent);
+            }
+        }
+    }
     storage::save_task(&task);
     Ok(task)
 }

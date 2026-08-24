@@ -14,8 +14,24 @@ export interface Agent {
   model: string;
   status: "idle" | "working" | "offline";
   current_task_id: string | null;
+  /** "local" = 来自本地 CLI(claude-code / hermes / opencode), "manual" = 手填 */
+  source: "local" | "manual";
+  cli_type: string | null;
+  local_agent_id: string | null;
+  cli_version: string | null;
+  cli_path: string | null;
   created_at: string;
   last_used_at: string;
+}
+
+export interface LocalAgentInfo {
+  type: "claude-code" | "hermes" | "opencode" | string;
+  command: string;
+  path: string | null;
+  available: boolean;
+  version: string | null;
+  registered: boolean;
+  agent_id: string | null;
 }
 
 export interface Task {

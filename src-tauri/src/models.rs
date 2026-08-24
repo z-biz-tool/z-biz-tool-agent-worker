@@ -20,6 +20,16 @@ pub struct Agent {
     pub model: String,
     pub status: String, // idle | working | offline
     pub current_task_id: Option<String>,
+    /// 来源: "local" = 本地 CLI(claude-code / hermes / opencode), "manual" = 手填
+    pub source: String,
+    /// 本地 CLI 类型, source=local 时必填
+    pub cli_type: Option<String>,
+    /// agent-proxy 注册的 id, source=local 时必填
+    pub local_agent_id: Option<String>,
+    /// 本地 CLI 版本(展示用)
+    pub cli_version: Option<String>,
+    /// 本地 CLI 可执行文件绝对路径(展示用)
+    pub cli_path: Option<String>,
     pub created_at: String,
     pub last_used_at: String,
 }
@@ -87,6 +97,20 @@ pub struct AppConfig {
     pub theme: String,
     pub api_endpoint: String,
     pub default_model: String,
+}
+
+// ===== 本地 CLI 探测结果(来自 agent-proxy /v1/cli-agents) =====
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAgentInfo {
+    /// claude-code / hermes / opencode
+    #[serde(rename = "type")]
+    pub cli_type: String,
+    pub command: String,
+    pub path: Option<String>,
+    pub available: bool,
+    pub version: Option<String>,
+    pub registered: bool,
+    pub agent_id: Option<String>,
 }
 
 impl Default for AppConfig {

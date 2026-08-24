@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { Project, Agent, Task, ProjectStats, AppConfig } from "../types";
+import type { Project, Agent, Task, ProjectStats, AppConfig, LocalAgentInfo } from "../types";
 
 interface WorkerState {
   projects: Project[];
@@ -18,11 +18,14 @@ interface WorkerState {
   createAgent: (projectId: string, name: string, prompt: string, model: string) => Promise<void>;
   deleteAgent: (id: string) => Promise<void>;
   cloneAgent: (projectId: string, sourceId: string, name: string) => Promise<void>;
+  discoverLocalAgents: () => Promise<LocalAgentInfo[]>;
+  importLocalAgent: (cli: LocalAgentInfo) => Promise<void>;
 
   createTask: (projectId: string, title: string, desc: string, parentId?: string) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
   assignTask: (taskId: string, agentId: string) => Promise<void>;
   reviewTask: (taskId: string, approved: boolean) => Promise<void>;
+  updateTaskStatus: (taskId: string, status: string) => Promise<void>;
 
   loadConfig: () => Promise<void>;
   saveConfig: (config: AppConfig) => Promise<void>;
@@ -78,6 +81,24 @@ export const useWorkerStore = create<WorkerState>((set, get) => ({
     await get().selectProject(projectId);
   },
 
+  discoverLocalAgents: async () => {
+    return await invoke<LocalAgentInfo[]>("discover_local_agents");
+  },
+
+  importLocalAgent: async (cli) => {
+    const pid = get().currentProjectId;
+    if (!pid) throw new Error("未选中项目");
+    await invoke("import_local_agent", {
+      projectId: pid,
+      cliType: cli.type,
+      command: cli.command,
+      cliPath: cli.path,
+      cliVersion: cli.version,
+      localAgentId: cli.agent_id,
+    });
+    await get().selectProject(pid);
+  },
+
   createTask: async (projectId, title, desc, parentId) => {
     await invoke("create_task", { projectId, title, desc, parentId: parentId || null });
     await get().selectProject(projectId);
@@ -97,6 +118,12 @@ export const useWorkerStore = create<WorkerState>((set, get) => ({
 
   reviewTask: async (taskId, approved) => {
     await invoke("review_task", { taskId, approved });
+    const pid = get().currentProjectId;
+    if (pid) await get().selectProject(pid);
+  },
+
+  updateTaskStatus: async (taskId, status) => {
+    await invoke("update_task_status", { taskId, status });
     const pid = get().currentProjectId;
     if (pid) await get().selectProject(pid);
   },
