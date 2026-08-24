@@ -1,19 +1,35 @@
-// Hermes wrapper: POST to the local hermes gateway (127.0.0.1:8642), which
-// itself fronts an OpenAI-compatible /v1/chat/completions endpoint. The gateway
-// supports true SSE streaming, so we read its stream line-by-line and forward
-// deltas to the client. Per-session message history is kept in memory; if the
-// caller didn't bind a session, we just send the request as-is.
+// Hermes wrapper. Two execution paths:
+//
+//   1. **Subprocess (default)** — `hermes chat -q "{prompt}" -Q`. The local
+//      `hermes` CLI is itself a full LLM client; no external service needed.
+//      `streamParser.extractDelta` already filters the `session_id: ...`
+//      header line and treats the remainder as plain text.
+//
+//   2. **HTTP gateway (legacy)** — POST to the local hermes gateway at
+//      127.0.0.1:8642 with `Authorization: Bearer <key>`. Used by the Java
+//      proxy and assumed available in some internal deployments. We fall
+//      back to this path when the subprocess is not available, OR when the
+//      caller sets the legacy `AGENT_PROXY_HERMES_LEGACY=1` env var.
+//
+// Session reuse for the subprocess path: we spawn a fresh `hermes chat` per
+// request, but if the caller passes a `sessionId` we feed it back via
+// `--resume` using a previously-observed hermes session id. The first
+// invocation of a given proxy session id captures hermes's `session_id: …`
+// header for that purpose.
 
+import { spawn } from 'child_process';
 import * as http from 'http';
 import { logger } from '../logger';
 import { config as appConfig } from '../config';
-import { escapeJson, readFileOrNull } from '../utils';
+import { buildPrompt, childProcessEnv, expandHome, readFileOrNull, resolveCommand } from '../utils';
 import { extractDelta } from '../streamParser';
 import { newCompletionId, sseChunk, sseDone, sseError } from '../sse';
 import type { ChatCompletionRequest, ChatMessage, CliAgentConfig } from '../types';
 import type { CliAgentWrapper, SseWriter } from './types';
 
 const sessionHistories = new Map<string, ChatMessage[]>();
+/** proxySessionId -> last hermes session_id we saw (so we can --resume). */
+const hermesSessionIds = new Map<string, string>();
 
 export class HermesProcessWrapper implements CliAgentWrapper {
   supports(type: string): boolean {
@@ -25,18 +41,77 @@ export class HermesProcessWrapper implements CliAgentWrapper {
     req: ChatCompletionRequest,
     sse: SseWriter
   ): Promise<string> {
+    // Subprocess path by default; HTTP path only when explicitly requested
+    // and the binary isn't available.
+    const useHttp =
+      process.env.AGENT_PROXY_HERMES_LEGACY === '1' &&
+      !resolveCommand('hermes');
+    if (useHttp) return this.streamViaGateway(req, sse);
+
     const completionId = newCompletionId();
     const created = Math.floor(Date.now() / 1000);
     const model = cfg.type;
-    const full = await this.consumeGateway(
-      req,
-      true,
-      (delta) => {
-        sse.write(sseChunk(completionId, model, created, delta));
-      },
-      (errMsg) => sse.write(sseError(errMsg))
-    );
-    sse.write(sseDone());
+    let full = '';
+    let errored = false;
+    try {
+      const proc = this.spawnHermesChat(cfg, req);
+      let buf = '';
+      proc.stdout.on('data', (chunk: Buffer) => {
+        buf += chunk.toString('utf-8');
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          const captured = captureSessionId(line, req.sessionId);
+          const delta = extractDelta(line);
+          if (delta) {
+            full += delta;
+            sse.write(sseChunk(completionId, model, created, delta));
+          } else if (captured) {
+            // session id line — already logged
+          }
+        }
+      });
+      // Hermes (-Q mode) writes the `session_id: ...` header to stderr, not
+      // stdout. Drain stderr so the OS pipe doesn't block, and run the same
+      // captureSessionId against stderr lines.
+      let stderr = '';
+      let stderrBuf = '';
+      proc.stderr.on('data', (b) => {
+        stderr += b.toString();
+        stderrBuf += b.toString();
+        let idx;
+        while ((idx = stderrBuf.indexOf('\n')) >= 0) {
+          const line = stderrBuf.slice(0, idx);
+          stderrBuf = stderrBuf.slice(idx + 1);
+          captureSessionId(line, req.sessionId);
+        }
+      });
+      const code = await waitForExit(proc, appConfig.processTimeoutMs);
+      // flush any tail without trailing newline
+      if (buf.length > 0) {
+        const delta = extractDelta(buf);
+        if (delta) {
+          full += delta;
+          sse.write(sseChunk(completionId, model, created, delta));
+        }
+        buf = '';
+      }
+      if (code === -1) {
+        sse.write(sseError('Hermes process timeout'));
+        errored = true;
+      } else if (code !== 0 && full.length === 0) {
+        sse.write(sseError(`Hermes exited with code ${code}: ${stderr.trim()}`));
+        errored = true;
+      } else if (code !== 0) {
+        logger.warn(`Hermes exited with code ${code}: ${stderr.trim()}`);
+      }
+    } catch (e: any) {
+      errored = true;
+      logger.warn('Hermes subprocess error:', e);
+      if (full.length === 0) sse.write(sseError('Hermes error: ' + (e?.message || String(e))));
+    }
+    if (!errored) sse.write(sseDone());
     return full;
   }
 
@@ -44,15 +119,94 @@ export class HermesProcessWrapper implements CliAgentWrapper {
     cfg: CliAgentConfig,
     req: ChatCompletionRequest
   ): Promise<string> {
-    return this.consumeGateway(req, false, () => undefined, (msg) => {
-      throw new Error(msg);
+    const useHttp =
+      process.env.AGENT_PROXY_HERMES_LEGACY === '1' &&
+      !resolveCommand('hermes');
+    if (useHttp) return this.consumeGateway(req, false, () => undefined, (m) => { throw new Error(m); });
+
+    const proc = this.spawnHermesChat(cfg, req);
+    let full = '';
+    let buf = '';
+    let stderr = '';
+    let stderrBuf = '';
+    proc.stdout.on('data', (b) => {
+      buf += b.toString('utf-8');
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        captureSessionId(line, req.sessionId);
+        const delta = extractDelta(line);
+        if (delta) full += delta;
+      }
+    });
+    proc.stderr.on('data', (b) => {
+      stderr += b.toString();
+      stderrBuf += b.toString();
+      let idx;
+      while ((idx = stderrBuf.indexOf('\n')) >= 0) {
+        const line = stderrBuf.slice(0, idx);
+        stderrBuf = stderrBuf.slice(idx + 1);
+        captureSessionId(line, req.sessionId);
+      }
+    });
+    const code = await waitForExit(proc, appConfig.processTimeoutMs);
+    if (buf.length > 0) {
+      const delta = extractDelta(buf);
+      if (delta) full += delta;
+    }
+    if (code === -1) throw new Error('Hermes process timeout');
+    if (code !== 0 && full.length === 0) {
+      throw new Error(`Hermes exited with code ${code}: ${stderr.trim()}`);
+    }
+    return full;
+  }
+
+  // ──────────── subprocess path ────────────
+
+  private spawnHermesChat(cfg: CliAgentConfig, req: ChatCompletionRequest) {
+    const prompt = buildPrompt(req.messages);
+    const resolved = resolveCommand(cfg.command) || cfg.command;
+
+    // base args: 'chat -q "{prompt}" -Q' (quiet mode for programmatic use)
+    const baseArgs: string[] = ['chat', '-q', prompt, '-Q'];
+
+    // session reuse: if we have a stored hermes session id for this proxy
+    // session, pass --resume so the model sees prior context.
+    if (req.sessionId) {
+      const hermesId = hermesSessionIds.get(req.sessionId);
+      if (hermesId) {
+        baseArgs.push('--resume', hermesId);
+        logger.info(`Resuming hermes session ${hermesId} for proxy session ${req.sessionId}`);
+      }
+    }
+
+    const env = childProcessEnv();
+    const cwd = cfg.workingDir ? expandHome(cfg.workingDir) : process.cwd();
+    logger.info(`Spawning hermes chat: command=${resolved} args=${JSON.stringify(baseArgs).slice(0, 200)}`);
+    return spawn(resolved, baseArgs, {
+      env,
+      cwd: cwd || process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
   }
 
-  // ──────────── internals ────────────
+  // ──────────── HTTP gateway path (legacy fallback) ────────────
 
-  /** Append this request's messages to the session's history and send the full
-   *  history to the gateway. Streamed or aggregated depending on `stream`. */
+  private async streamViaGateway(req: ChatCompletionRequest, sse: SseWriter): Promise<string> {
+    const completionId = newCompletionId();
+    const created = Math.floor(Date.now() / 1000);
+    const model = 'hermes';
+    const full = await this.consumeGateway(
+      req,
+      true,
+      (delta) => sse.write(sseChunk(completionId, model, created, delta)),
+      (errMsg) => sse.write(sseError(errMsg))
+    );
+    sse.write(sseDone());
+    return full;
+  }
+
   private async consumeGateway(
     req: ChatCompletionRequest,
     stream: boolean,
@@ -65,9 +219,7 @@ export class HermesProcessWrapper implements CliAgentWrapper {
       onError('Hermes gateway API key not found at ' + appConfig.hermesApiKeyFile);
       return '';
     }
-
     let full = '';
-    let lastError: string | null = null;
     try {
       await new Promise<void>((resolve, reject) => {
         const url = new URL(appConfig.hermesGatewayUrl);
@@ -87,10 +239,10 @@ export class HermesProcessWrapper implements CliAgentWrapper {
           (res) => {
             const code = res.statusCode || 0;
             if (code !== 200) {
-              const err = readAllText(res).then((txt) => {
-                reject(new Error(`Hermes gateway returned HTTP ${code}: ${txt}`));
-              });
-              return err;
+              readAllText(res).then((txt) =>
+                reject(new Error(`Hermes gateway returned HTTP ${code}: ${txt}`))
+              );
+              return;
             }
             res.setEncoding('utf-8');
             let buffer = '';
@@ -123,11 +275,9 @@ export class HermesProcessWrapper implements CliAgentWrapper {
         req2.end();
       });
     } catch (e: any) {
-      lastError = e?.message || String(e);
-      logger.warn('Hermes gateway error:', lastError);
-      if (full.length === 0) onError('Gateway error: ' + lastError);
+      logger.warn('Hermes gateway error:', e?.message);
+      if (full.length === 0) onError('Gateway error: ' + (e?.message || String(e)));
     }
-    if (lastError && full.length > 0) logger.warn('Hermes partial reply despite error:', lastError);
     return full;
   }
 
@@ -137,9 +287,26 @@ export class HermesProcessWrapper implements CliAgentWrapper {
     const hist = sessionHistories.get(sessionId) || [];
     if (req.messages && req.messages.length > 0) hist.push(...req.messages);
     sessionHistories.set(sessionId, hist);
-    logger.info(`Session ${sessionId} message history: ${hist.length} messages`);
     return hist;
   }
+}
+
+// ──────────── helpers ────────────
+
+/** If a line is "session_id: ...", record it under the proxy session so the
+ *  next request can --resume. Returns true if captured. */
+function captureSessionId(line: string, proxySessionId: string | undefined): boolean {
+  if (process.env.AGENT_PROXY_DEBUG === '1') {
+    process.stderr.write(`[hermes-wrapper] saw line: ${JSON.stringify(line)} sessionId=${proxySessionId}\n`);
+  }
+  const m = line.match(/^session_id:\s*(\S+)/);
+  if (!m || !proxySessionId) return false;
+  hermesSessionIds.set(proxySessionId, m[1]);
+  logger.info(`Captured hermes session_id=${m[1]} for proxy session ${proxySessionId}`);
+  if (process.env.AGENT_PROXY_DEBUG === '1') {
+    process.stderr.write(`[hermes-wrapper] map now has ${hermesSessionIds.size} entries\n`);
+  }
+  return true;
 }
 
 function readApiKey(): string | null {
@@ -150,16 +317,13 @@ function readApiKey(): string | null {
 }
 
 function buildGatewayBody(messages: ChatMessage[], stream: boolean): string {
-  const msgsJson = (messages || [])
-    .map((m) => ({
-      role: m.role || 'user',
-      content: m.content || '',
-    }));
-  // Avoid hand-rolled JSON; use JSON.stringify + a custom replacer would be
-  // tidier but the wrapper used to do it manually; staying literal for parity.
   const parts: string[] = [];
-  for (const m of msgsJson) {
-    parts.push(`{"role":"${escapeJson(m.role)}","content":"${escapeJson(m.content)}"}`);
+  for (const m of messages || []) {
+    const role = m.role || 'user';
+    const content = m.content || '';
+    // reuse escapeJson for safe embedding
+    const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+    parts.push(`{"role":"${esc(role)}","content":"${esc(content)}"}`);
   }
   return `{"messages":[${parts.join(',')}],"stream":${stream}}`;
 }
@@ -171,5 +335,22 @@ function readAllText(stream: NodeJS.ReadableStream): Promise<string> {
     stream.on('data', (c) => (buf += c));
     stream.on('end', () => resolve(buf));
     stream.on('error', () => resolve(buf));
+  });
+}
+
+function waitForExit(proc: ReturnType<typeof spawn>, timeoutMs: number): Promise<number> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      resolve(-1);
+    }, timeoutMs);
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      resolve(code ?? 0);
+    });
+    proc.on('error', () => {
+      clearTimeout(timer);
+      resolve(1);
+    });
   });
 }

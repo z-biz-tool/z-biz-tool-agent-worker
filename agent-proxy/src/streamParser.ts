@@ -30,7 +30,12 @@ export function extractDelta(line: string | null | undefined): string | null {
     if (!line.startsWith('{') && !line.startsWith('[')) return line;
     return null;
   }
-  if (!parsed || typeof parsed !== 'object') return null;
+  // `JSON.parse('7421')` returns the number 7421, `JSON.parse('"foo"')` returns
+  // the string "foo", etc. None of those are useful here — fall through to
+  // the line itself so callers still get the text.
+  if (parsed === null || typeof parsed !== 'object') {
+    return line;
+  }
 
   const type = parsed.type;
 
