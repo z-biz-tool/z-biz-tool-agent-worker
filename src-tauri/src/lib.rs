@@ -1,5 +1,6 @@
 mod agent_proxy;
 mod agent_runner;
+mod agent_session;
 mod commands;
 mod models;
 mod storage;
@@ -16,6 +17,8 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         // Owned by the app so the event loop can find it on shutdown.
         .manage(agent_proxy::AgentProxyHandle(Mutex::new(None)))
+        // Agent -> proxy session mapping. Survives across launches.
+        .manage(agent_session::AgentSessionState::load())
         .invoke_handler(tauri::generate_handler![
             commands::list_projects,
             commands::create_project,
@@ -39,6 +42,10 @@ pub fn run() {
             commands::get_task_messages,
             commands::get_config,
             commands::save_config,
+            agent_session::get_agent_session,
+            agent_session::set_agent_cli_type,
+            agent_session::list_agent_sessions,
+            agent_session::run_agent_turn,
         ])
         .setup(|app| {
             match agent_proxy::spawn() {

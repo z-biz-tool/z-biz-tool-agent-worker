@@ -432,18 +432,130 @@ pub fn get_agent_status(agent_id: String) -> Result<AgentStatus, String> {
 // ===== 消息 =====
 
 #[tauri::command]
-pub fn send_task_message(task_id: String, message: String) -> Result<TaskMessage, String> {
-    let now = Utc::now().to_rfc3339();
-    let msg = TaskMessage {
+pub async fn send_task_message(
+    app: tauri::AppHandle,
+    task_id: String,
+    message: String,
+) -> Result<TaskExchangeResult, String> {
+    // 1. Store the user's message first so it's persisted even if the
+    //    LLM call later fails.
+    let now = chrono::Utc::now().to_rfc3339();
+    let user_msg = TaskMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        task_id,
+        task_id: task_id.clone(),
         role: "user".to_string(),
-        content: message,
-        created_at: now,
+        content: message.clone(),
+        created_at: now.clone(),
     };
-    storage::save_task_message(&msg);
-    // TODO: 实际调用AI API的逻辑后续实现
-    Ok(msg)
+    storage::save_task_message(&user_msg);
+
+    // 2. Look up the task + assigned agent. If no agent is assigned we
+    //    just return — the UI can prompt the user to assign one.
+    let task = match storage::find_task(&task_id) {
+        Some(t) => t,
+        None => return Ok(TaskExchangeResult { user: user_msg, agent: None }),
+    };
+    let agent_id = match &task.assigned_agent_id {
+        Some(a) => a.clone(),
+        None => return Ok(TaskExchangeResult { user: user_msg, agent: None }),
+    };
+    let agent = match storage::find_agent(&agent_id) {
+        Some(a) => a,
+        None => {
+            return Ok(TaskExchangeResult {
+                user: user_msg,
+                agent: None,
+            })
+        }
+    };
+
+    // 3. Build the message context: system prompt (agent), task
+    //    description, prior messages, the new user message.
+    let history = storage::read_task_messages(&task_id);
+    let mut history_msgs: Vec<crate::agent_session::ChatMessage> = Vec::new();
+    if let Some(first) = history.first() {
+        // Anchor the conversation with the task description so the agent
+        // has the brief in context.
+        if !task.description.is_empty() {
+            history_msgs.push(crate::agent_session::ChatMessage {
+                role: "user".to_string(),
+                content: format!("[Task: {}]\n{}", task.title, task.description),
+            });
+        }
+        let _ = first; // silence unused
+    }
+    for m in &history {
+        if m.role == "user" {
+            history_msgs.push(crate::agent_session::ChatMessage {
+                role: "user".to_string(),
+                content: m.content.clone(),
+            });
+        } else if m.role == "agent" {
+            history_msgs.push(crate::agent_session::ChatMessage {
+                role: "assistant".to_string(),
+                content: m.content.clone(),
+            });
+        }
+    }
+    // The just-stored user message is already in `history`; avoid double.
+    history_msgs.pop();
+
+    // 4. Call the proxy. The session id is stable per-agent so the
+    //    underlying CLI keeps the conversation context.
+    let result = crate::agent_session::run_agent_turn_inner(
+        &app,
+        agent.id.clone(),
+        agent.system_prompt.clone(),
+        message,
+        Some(history_msgs),
+    )
+    .await;
+
+    match result {
+        Ok(out) => {
+            // Persist the assistant reply as an agent message.
+            let agent_msg = TaskMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.clone(),
+                role: "agent".to_string(),
+                content: out.reply.clone(),
+                created_at: now.clone(),
+            };
+            storage::save_task_message(&agent_msg);
+            // Bump agent last_used_at and mark working->idle (a turn is done).
+            let mut a = agent.clone();
+            a.last_used_at = now;
+            a.status = "idle".to_string();
+            a.current_task_id = None;
+            storage::save_agent(&a);
+            Ok(TaskExchangeResult {
+                user: user_msg,
+                agent: Some(agent_msg),
+            })
+        }
+        Err(e) => {
+            // Don't fail the whole call — the user message is saved.
+            // Surface the error as an agent message so the UI shows it.
+            let err_msg = TaskMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                task_id: task_id.clone(),
+                role: "agent".to_string(),
+                content: format!("[error] {}", e),
+                created_at: now,
+            };
+            storage::save_task_message(&err_msg);
+            Ok(TaskExchangeResult {
+                user: user_msg,
+                agent: Some(err_msg),
+            })
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct TaskExchangeResult {
+    pub user: TaskMessage,
+    pub agent: Option<TaskMessage>,
 }
 
 #[tauri::command]
