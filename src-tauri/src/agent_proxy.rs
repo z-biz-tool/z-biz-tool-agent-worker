@@ -92,7 +92,8 @@ fn is_port_in_use(port: u16) -> bool {
 }
 
 fn resolve_node() -> Option<PathBuf> {
-    // Prefer absolute path so we don't depend on the spawned child's PATH.
+    // 1. `which node` — works if PATH includes the user's node install
+    //    (e.g. homebrew in /opt/homebrew/bin which is in default macOS PATH).
     if let Ok(out) = Command::new("which").arg("node").output() {
         if out.status.success() {
             let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -101,7 +102,53 @@ fn resolve_node() -> Option<PathBuf> {
             }
         }
     }
-    // Fall back: rely on PATH lookup via bare command name.
+
+    // 2. Scan common install locations. macOS .app processes inherit a
+    //    minimal PATH that usually excludes nvm-managed bins, so we
+    //    look in the obvious spots directly.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates: [PathBuf; 8] = [
+        PathBuf::from("/opt/homebrew/bin/node"),
+        PathBuf::from("/usr/local/bin/node"),
+        PathBuf::from("/usr/bin/node"),
+        PathBuf::from("/bin/node"),
+        PathBuf::from(home.clone() + "/.local/bin/node"),
+        PathBuf::from(home.clone() + "/.nvm/versions/node"),
+        // last-resort: maybe node is sitting on the Desktop or something;
+        // skip — the scan below handles nvm versions.
+        PathBuf::new(),
+        PathBuf::new(),
+    ];
+    for c in candidates.iter() {
+        if c.as_os_str().is_empty() {
+            continue;
+        }
+        if c.is_file() {
+            return Some(c.clone());
+        }
+    }
+
+    // 3. nvm version dir — pick the highest version
+    let nvm_root = PathBuf::from(home + "/.nvm/versions/node");
+    if nvm_root.is_dir() {
+        if let Ok(rd) = std::fs::read_dir(&nvm_root) {
+            let mut versions: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            // Sort descending by version string (rough — works for semver-ish).
+            versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+            for v in versions {
+                let p = v.join("bin").join("node");
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+
+    // 4. Last resort: bare name, let the OS resolve via PATH.
     Some(PathBuf::from("node"))
 }
 

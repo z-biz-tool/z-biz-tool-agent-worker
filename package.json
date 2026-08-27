@@ -10,8 +10,9 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
-    "agent-proxy:build": "cd agent-proxy && ../node_modules/.bin/tsc -p tsconfig.json",
-    "agent-proxy:start": "node agent-proxy/dist/index.js"
+    "agent-proxy:build": "cd agent-proxy && npm run build",
+    "agent-proxy:start": "node agent-proxy/dist/index.js",
+    "build:all": "npm run build && npm run agent-proxy:build"
   },
   "dependencies": {
     "@ant-design/icons": "^6.0.0",
