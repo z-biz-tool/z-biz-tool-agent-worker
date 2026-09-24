@@ -5497,7 +5497,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "z-biz-tool-agent-worker"
+name = "z-biz-tool-worker"
 version = "0.2.0"
 dependencies = [
  "chrono",

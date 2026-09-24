@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "z-biz-tool-agent-worker",
+  "productName": "z-biz-tool-worker",
   "version": "0.2.0",
-  "identifier": "com.zifang.z-biz-tool-agent-worker",
+  "identifier": "com.zifang.z-biz-tool-worker",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
